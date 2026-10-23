@@ -19,7 +19,7 @@ jobs:
       project: TasksApp
       scheme: TasksApp
       bundle-id: com.joeellis.TasksApp
-      minutes: ${{ inputs.minutes }}
+      minutes: ${{ fromJSON(inputs.minutes) }}
       device: ${{ inputs.device }}
       lab-ref: ${{ github.sha }}
     secrets: inherit

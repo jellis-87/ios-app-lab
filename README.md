@@ -49,7 +49,7 @@ jobs:
       project: MyApp            # Xcode project name
       scheme: MyApp
       bundle-id: com.example.MyApp
-      minutes: ${{ inputs.minutes }}
+      minutes: ${{ fromJSON(inputs.minutes) }}
     secrets: inherit
 ```
 
