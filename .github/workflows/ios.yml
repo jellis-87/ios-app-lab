@@ -1,0 +1,98 @@
+name: iOS build
+
+on:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      SCHEME: TasksApp
+      BUNDLE_ID: com.joeellis.TasksApp
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Pick an iPhone simulator
+        id: sim
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          phones = [d for runtime, ds in devices.items() if "iOS" in runtime for d in ds if d["name"].startswith("iPhone")]
+          preferred = [d for d in phones if d["name"] == "iPhone 16 Pro"]
+          print((preferred or phones)[-1]["udid"])
+          ')
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl list devices | grep "$UDID"
+
+      - name: Build and run unit tests
+        run: |
+          set +e
+          xcodebuild test \
+            -project "$SCHEME.xcodeproj" \
+            -scheme "$SCHEME" \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath build \
+            > xcodebuild.log 2>&1
+          status=$?
+          grep -E "error:|warning: |Test Case .*(passed|failed)|\*\* (BUILD|TEST) " xcodebuild.log | awk '!seen[$0]++' | head -300
+          if [ $status -ne 0 ]; then
+            {
+              echo "## Build or tests failed"
+              echo '```'
+              grep -E "error:|Test Case .*failed" xcodebuild.log | awk '!seen[$0]++' | head -60
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit $status
+
+      - name: Launch in the simulator and take screenshots
+        run: |
+          UDID=${{ steps.sim.outputs.udid }}
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl status_bar "$UDID" override --time "9:41" --batteryLevel 100 --cellularBars 4 || true
+          APP=$(find build/Build/Products -path "*iphonesimulator*" -name "$SCHEME.app" -maxdepth 3 | head -1)
+          xcrun simctl install "$UDID" "$APP"
+          mkdir -p screenshots
+          xcrun simctl ui "$UDID" appearance light
+          xcrun simctl launch "$UDID" "$BUNDLE_ID"
+          sleep 6
+          xcrun simctl io "$UDID" screenshot screenshots/light.png
+          xcrun simctl ui "$UDID" appearance dark
+          sleep 3
+          xcrun simctl io "$UDID" screenshot screenshots/dark.png
+          (cd "$(dirname "$APP")" && zip -qry "$GITHUB_WORKSPACE/$SCHEME-simulator.zip" "$SCHEME.app")
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots/
+
+      - name: Upload simulator build
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulator-app
+          path: ${{ env.SCHEME }}-simulator.zip
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: xcodebuild.log
