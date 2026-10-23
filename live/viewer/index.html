@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>{{APP_NAME}} · Live session</title>
+<style>
+  :root {
+    --bg: #15171c; --panel: #1f232b; --line: #323844; --fg: #e8ebf1; --muted: #9aa3b2;
+    --accent: #4c93ff; --live: #3ccf6e; --warn: #f5b942; --err: #ff6b6b;
+    --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "SF Mono", Consolas, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.45 var(--font); }
+  button, input { font: inherit; color: inherit; }
+  [hidden] { display: none !important; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .login { min-height: 100%; display: grid; place-items: center; padding: 16px; }
+  .login form { width: min(360px, 100%); display: grid; gap: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 24px; }
+  .login h1 { margin: 0; font-size: 20px; }
+  .login p { margin: 0; color: var(--muted); }
+  .login input { height: 40px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); }
+  .error { color: var(--err); min-height: 1.4em; }
+
+  .app { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 240px; }
+  @media (max-width: 760px) { .app { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; } }
+  .stage { min-height: 0; display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .phone { position: relative; height: 100%; max-height: 900px; aspect-ratio: 0.46; max-width: 100%;
+           border-radius: 48px; padding: 12px; background: linear-gradient(145deg, #3b3e45, #16181c 45%, #2b2e34);
+           box-shadow: 0 0 0 2px #50545c inset, 0 24px 60px -20px #000; }
+  .phone.landscape { height: auto; width: 100%; max-width: 1100px; aspect-ratio: 2.17; }
+  .screen { position: relative; width: 100%; height: 100%; border-radius: 38px; overflow: hidden; background: #000; touch-action: none; cursor: pointer; }
+  .screen img { width: 100%; height: 100%; object-fit: contain; display: block; user-select: none; -webkit-user-drag: none; }
+  .ripple { position: absolute; width: 36px; height: 36px; margin: -18px 0 0 -18px; border-radius: 50%; background: rgba(76,147,255,.45); pointer-events: none; animation: ripple .45s ease-out forwards; }
+  @keyframes ripple { from { transform: scale(.4); opacity: 1 } to { transform: scale(1.4); opacity: 0 } }
+  .waiting { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); text-align: center; padding: 24px; }
+
+  .side { border-left: 1px solid var(--line); background: var(--panel); padding: 16px; display: flex; flex-direction: column; gap: 14px; overflow: auto; }
+  @media (max-width: 760px) { .side { border-left: 0; border-top: 1px solid var(--line); } }
+  .side h2 { margin: 0; font-size: 16px; }
+  .status { display: flex; align-items: center; gap: 8px; color: var(--muted); font: 12px var(--mono); font-variant-numeric: tabular-nums; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: none; }
+  .dot.live { background: var(--live); }
+  .dot.down { background: var(--err); }
+  .group { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .btn { height: 36px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); cursor: pointer; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #0b1020; font-weight: 600; }
+  .btn.danger { color: var(--err); }
+  .label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .typebox { display: flex; gap: 8px; }
+  .typebox input { flex: 1; min-width: 0; height: 36px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); }
+  .hint { color: var(--muted); font-size: 12.5px; margin: 0; }
+  .toast { color: var(--warn); font-size: 12.5px; min-height: 1.4em; }
+  .ended { min-height: 100%; display: grid; place-items: center; text-align: center; padding: 16px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<section class="login" id="login">
+  <form id="loginForm">
+    <h1>{{APP_NAME}} live session</h1>
+    <p>Enter the session password (the LIVE_PASSWORD secret).</p>
+    <input id="password" type="password" autocomplete="current-password" aria-label="Session password" required>
+    <button class="btn primary" type="submit">Connect</button>
+    <div class="error" id="loginError" role="alert"></div>
+  </form>
+</section>
+
+<main class="app" id="app" hidden>
+  <section class="stage">
+    <div class="phone" id="phone">
+      <div class="screen" id="screen" tabindex="0" aria-label="Simulator screen. Click to tap, drag to swipe, type while focused.">
+        <img id="frame" alt="" draggable="false">
+        <div class="waiting" id="waiting">Connecting to the simulator…</div>
+      </div>
+    </div>
+  </section>
+  <aside class="side">
+    <h2>{{APP_NAME}}</h2>
+    <div class="status"><span class="dot" id="dot"></span><span id="status">Connecting</span></div>
+    <div>
+      <div class="label">Device</div>
+      <div class="group">
+        <button class="btn" data-cmd="home">Home</button>
+        <button class="btn" data-cmd="launch">Open app</button>
+        <button class="btn" data-cmd="relaunch">Restart app</button>
+        <button class="btn" data-cmd="rotate">Rotate</button>
+        <button class="btn" id="appearance">Dark mode</button>
+        <button class="btn" data-cmd="type" data-text="&#10;">Return key</button>
+      </div>
+    </div>
+    <div>
+      <div class="label">Type into the app</div>
+      <form class="typebox" id="typeForm">
+        <input id="typeText" placeholder="Text to type" aria-label="Text to type">
+        <button class="btn" type="submit">Send</button>
+      </form>
+    </div>
+    <p class="hint">Click to tap. Drag to swipe or scroll. Hold for a long press. With the screen focused, your keyboard types into the app (tap a text field first).</p>
+    <div class="toast" id="toast" role="status"></div>
+    <button class="btn danger" id="endBtn">End session</button>
+  </aside>
+</main>
+
+<section class="ended" id="ended" hidden>
+  <div><h1>Session ended</h1><p>The GitHub Mac is shutting down. You can close this tab.</p></div>
+</section>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  let key = '';
+  try { key = sessionStorage.getItem('liveKey') || ''; } catch (e) {}
+  let running = false, dark = false, landscape = false, toastTimer;
+
+  const api = (method, path, body) => fetch(path, {
+    method, headers: { 'X-Live-Key': key, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined, cache: 'no-store'
+  });
+
+  function toast(msg) {
+    $('toast').textContent = msg;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { $('toast').textContent = ''; }, 4000);
+  }
+  function setStatus(text, state) {
+    $('status').textContent = text;
+    $('dot').className = 'dot' + (state ? ' ' + state : '');
+  }
+
+  // Commands run one at a time, in order.
+  let chain = Promise.resolve();
+  function send(cmd, body) {
+    chain = chain.then(async () => {
+      try {
+        const r = await api('POST', '/api/' + cmd, body || {});
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || data.ok === false) toast(data.error || ('Command failed (' + r.status + ')'));
+      } catch (e) { toast('Connection lost. Retrying…'); }
+    });
+    return chain;
+  }
+
+  async function login(candidate) {
+    key = candidate;
+    const r = await api('GET', '/api/check');
+    if (r.ok) {
+      try { sessionStorage.setItem('liveKey', key); } catch (e) {}
+      $('login').hidden = true; $('app').hidden = false;
+      running = true; frameLoop(); $('screen').focus();
+      return true;
+    }
+    const data = await r.json().catch(() => ({}));
+    $('loginError').textContent = data.error || 'Could not connect.';
+    return false;
+  }
+  $('loginForm').addEventListener('submit', e => { e.preventDefault(); login($('password').value); });
+
+  // Screenshot loop: ask for the next frame as soon as the last one arrives.
+  async function frameLoop() {
+    let frames = 0, since = performance.now(), lastUrl = null;
+    while (running) {
+      const started = performance.now();
+      try {
+        const width = Math.min(900, Math.round($('screen').clientWidth * (window.devicePixelRatio || 1)));
+        const r = await api('GET', '/api/frame?w=' + width);
+        if (r.status === 401 || r.status === 429) { running = false; location.reload(); return; }
+        if (!r.ok) throw new Error('frame ' + r.status);
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        $('frame').src = url;
+        if (lastUrl) URL.revokeObjectURL(lastUrl);
+        lastUrl = url;
+        $('waiting').hidden = true;
+        frames++;
+        const now = performance.now();
+        if (now - since > 1000) {
+          setStatus('Live · ' + (frames * 1000 / (now - since)).toFixed(1) + ' fps · ' + Math.round(now - started) + ' ms', 'live');
+          frames = 0; since = now;
+        }
+      } catch (e) {
+        setStatus('Reconnecting…', 'down');
+        await new Promise(res => setTimeout(res, 1500));
+      }
+    }
+  }
+
+  // Pointer input: click = tap, hold = long press, drag = swipe.
+  const screen = $('screen');
+  let down = null;
+  function norm(ev) {
+    const img = $('frame'), box = img.getBoundingClientRect();
+    const iw = img.naturalWidth || box.width, ih = img.naturalHeight || box.height;
+    const scale = Math.min(box.width / iw, box.height / ih);
+    const w = iw * scale, h = ih * scale, left = box.left + (box.width - w) / 2, top = box.top + (box.height - h) / 2;
+    const clamp = v => Math.min(1, Math.max(0, v));
+    return { x: clamp((ev.clientX - left) / w), y: clamp((ev.clientY - top) / h), px: ev.clientX - screen.getBoundingClientRect().left, py: ev.clientY - screen.getBoundingClientRect().top };
+  }
+  function ripple(p) {
+    const r = document.createElement('div');
+    r.className = 'ripple'; r.style.left = p.px + 'px'; r.style.top = p.py + 'px';
+    screen.appendChild(r); setTimeout(() => r.remove(), 500);
+  }
+  screen.addEventListener('pointerdown', ev => {
+    if (ev.button !== 0) return;
+    screen.setPointerCapture(ev.pointerId);
+    down = { p: norm(ev), t: performance.now(), cx: ev.clientX, cy: ev.clientY };
+  });
+  screen.addEventListener('pointerup', ev => {
+    if (!down) return;
+    const p = norm(ev), moved = Math.hypot(ev.clientX - down.cx, ev.clientY - down.cy), held = performance.now() - down.t;
+    if (moved < 10) {
+      ripple(p);
+      send(held > 500 ? 'longpress' : 'tap', { x: down.p.x, y: down.p.y });
+    } else {
+      send('swipe', { x1: down.p.x, y1: down.p.y, x2: p.x, y2: p.y });
+    }
+    down = null;
+  });
+  screen.addEventListener('pointercancel', () => { down = null; });
+  screen.addEventListener('contextmenu', ev => ev.preventDefault());
+
+  // Mouse wheel scrolls with a short swipe.
+  let wheelAt = 0;
+  screen.addEventListener('wheel', ev => {
+    ev.preventDefault();
+    const now = performance.now();
+    if (now - wheelAt < 450) return;
+    wheelAt = now;
+    const p = norm(ev), dir = Math.sign(ev.deltaY) || 1;
+    send('swipe', { x1: p.x, y1: 0.6, x2: p.x, y2: 0.6 - dir * 0.3 });
+  }, { passive: false });
+
+  // Keyboard: batch keystrokes while the screen has focus.
+  let buffer = '', flushTimer;
+  screen.addEventListener('keydown', ev => {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    let ch = null;
+    if (ev.key === 'Enter') ch = '\n';
+    else if (ev.key === 'Backspace') ch = '\b';
+    else if (ev.key.length === 1) ch = ev.key;
+    if (ch === null) return;
+    ev.preventDefault();
+    buffer += ch;
+    clearTimeout(flushTimer);
+    flushTimer = setTimeout(() => { const text = buffer; buffer = ''; send('type', { text }); }, 150);
+  });
+
+  document.querySelectorAll('[data-cmd]').forEach(b => b.addEventListener('click', () => {
+    const cmd = b.dataset.cmd;
+    if (cmd === 'rotate') { landscape = !landscape; $('phone').classList.toggle('landscape', landscape); }
+    send(cmd, cmd === 'type' ? { text: b.dataset.text } : {});
+  }));
+  $('appearance').addEventListener('click', () => {
+    dark = !dark;
+    $('appearance').textContent = dark ? 'Light mode' : 'Dark mode';
+    send('appearance', { mode: dark ? 'dark' : 'light' });
+  });
+  $('typeForm').addEventListener('submit', e => {
+    e.preventDefault();
+    const text = $('typeText').value;
+    if (text) { send('type', { text }); $('typeText').value = ''; }
+  });
+  $('endBtn').addEventListener('click', async () => {
+    if ($('endBtn').dataset.confirm !== '1') {
+      $('endBtn').dataset.confirm = '1'; $('endBtn').textContent = 'Click again to end';
+      setTimeout(() => { $('endBtn').dataset.confirm = ''; $('endBtn').textContent = 'End session'; }, 3000);
+      return;
+    }
+    running = false;
+    await api('POST', '/api/stop', {}).catch(() => {});
+    try { sessionStorage.removeItem('liveKey'); } catch (e) {}
+    $('app').hidden = true; $('ended').hidden = false;
+  });
+
+  if (key) login(key).then(ok => { if (!ok) { $('loginError').textContent = ''; } });
+})();
+</script>
+</body>
+</html>

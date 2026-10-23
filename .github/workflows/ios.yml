@@ -2,6 +2,10 @@ name: iOS build
 
 on:
   push:
+    paths-ignore:
+      - "live/**"
+      - ".github/workflows/live-*.yml"
+      - "README.md"
   workflow_dispatch:
 
 concurrency:

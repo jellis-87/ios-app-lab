@@ -1,0 +1,25 @@
+name: Live session (Tasks)
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: How long to keep the session open (at most 300)
+        type: number
+        default: 30
+      device:
+        description: Simulator
+        type: string
+        default: iPhone 16 Pro
+
+jobs:
+  live:
+    uses: ./.github/workflows/live-session.yml
+    with:
+      project: TasksApp
+      scheme: TasksApp
+      bundle-id: com.joeellis.TasksApp
+      minutes: ${{ inputs.minutes }}
+      device: ${{ inputs.device }}
+      lab-ref: ${{ github.sha }}
+    secrets: inherit

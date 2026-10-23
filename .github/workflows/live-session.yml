@@ -1,0 +1,206 @@
+# Reusable live session: builds an iOS app, runs it in the iPhone Simulator on a
+# GitHub macOS runner, and serves the screen to your browser so you can tap it live.
+#
+# Call it from the app's own repository (so the session counts as testing that app):
+#
+#   jobs:
+#     live:
+#       uses: jellis-87/ios-app-lab/.github/workflows/live-session.yml@main
+#       with: { project-dir: ios, project: MyApp, scheme: MyApp, bundle-id: com.example.MyApp }
+#       secrets: inherit   # needs a LIVE_PASSWORD secret in the calling repository
+name: Live session (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      project-dir:
+        description: Folder holding project.yml or the .xcodeproj, relative to the repository root
+        type: string
+        default: "."
+      project:
+        description: Xcode project name, without .xcodeproj
+        type: string
+        required: true
+      scheme:
+        type: string
+        required: true
+      bundle-id:
+        description: Bundle identifier of the app to launch
+        type: string
+        required: true
+      xcodegen:
+        description: Generate the project from project.yml with XcodeGen first
+        type: boolean
+        default: true
+      device:
+        description: Simulator to use; falls back to the newest iPhone
+        type: string
+        default: iPhone 16 Pro
+      minutes:
+        description: How long to keep the session open (at most 300)
+        type: number
+        default: 60
+      lab-ref:
+        description: Branch or commit of ios-app-lab to take the live tooling from
+        type: string
+        default: main
+    secrets:
+      LIVE_PASSWORD:
+        required: true
+
+jobs:
+  live:
+    name: Live session
+    runs-on: macos-15
+    timeout-minutes: 345
+    env:
+      PROJECT: ${{ inputs.project }}
+      SCHEME: ${{ inputs.scheme }}
+      BUNDLE_ID: ${{ inputs.bundle-id }}
+    steps:
+      - name: Check the session password
+        env:
+          LIVE_PASSWORD: ${{ secrets.LIVE_PASSWORD }}
+        run: |
+          if [ ${#LIVE_PASSWORD} -lt 8 ]; then
+            echo "::error::Add a LIVE_PASSWORD secret of at least 8 characters to this repository (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+
+      - name: Check out the app
+        uses: actions/checkout@v4
+        with:
+          path: app
+
+      - name: Check out the live tooling
+        uses: actions/checkout@v4
+        with:
+          repository: jellis-87/ios-app-lab
+          ref: ${{ inputs.lab-ref }}
+          path: lab
+
+      - name: Install XcodeGen and cloudflared
+        run: brew install xcodegen cloudflared
+
+      - name: Start the simulator
+        id: sim
+        env:
+          DEVICE: ${{ inputs.device }}
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, os, sys
+          devices = json.load(sys.stdin)["devices"]
+          runtimes = sorted((k for k in devices if "iOS" in k), key=lambda k: [int(x) for x in k.rsplit("iOS-", 1)[1].split("-")])
+          phones = [d for k in runtimes for d in devices[k] if d["name"].startswith("iPhone")]
+          wanted = [d for d in phones if d["name"] == os.environ["DEVICE"]]
+          print((wanted or phones)[-1]["udid"])
+          ')
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl list devices | grep "$UDID"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl status_bar "$UDID" override --time "9:41" --batteryLevel 100 --cellularBars 4 || true
+
+      - name: Build and install the app
+        working-directory: app/${{ inputs.project-dir }}
+        env:
+          UDID: ${{ steps.sim.outputs.udid }}
+        run: |
+          if [ "${{ inputs.xcodegen }}" = "true" ]; then xcodegen generate; fi
+          if ! xcodebuild build -project "$PROJECT.xcodeproj" -scheme "$SCHEME" \
+                -destination "id=$UDID" -derivedDataPath "$RUNNER_TEMP/app-build" \
+                CODE_SIGNING_ALLOWED=NO > "$RUNNER_TEMP/app-build.log" 2>&1; then
+            grep -E "error:" "$RUNNER_TEMP/app-build.log" | awk '!seen[$0]++' | head -40
+            tail -40 "$RUNNER_TEMP/app-build.log"
+            exit 1
+          fi
+          APP=$(find "$RUNNER_TEMP/app-build/Build/Products" -maxdepth 2 -name "*.app" -path "*iphonesimulator*" | head -1)
+          echo "Installing $APP"
+          xcrun simctl install "$UDID" "$APP"
+
+      - name: Build the tap driver
+        working-directory: lab/live/driver
+        env:
+          UDID: ${{ steps.sim.outputs.udid }}
+        run: |
+          xcodegen generate
+          if ! xcodebuild build-for-testing -project LiveDriver.xcodeproj -scheme LiveDriver \
+                -destination "id=$UDID" -derivedDataPath "$RUNNER_TEMP/driver-build" \
+                > "$RUNNER_TEMP/driver-build.log" 2>&1; then
+            grep -E "error:" "$RUNNER_TEMP/driver-build.log" | awk '!seen[$0]++' | head -40
+            tail -40 "$RUNNER_TEMP/driver-build.log"
+            exit 1
+          fi
+
+      - name: Start the tap driver
+        env:
+          UDID: ${{ steps.sim.outputs.udid }}
+          TEST_RUNNER_TARGET_BUNDLE_ID: ${{ inputs.bundle-id }}
+          TEST_RUNNER_DRIVER_PORT: "8100"
+        run: |
+          nohup xcodebuild test-without-building -project lab/live/driver/LiveDriver.xcodeproj -scheme LiveDriver \
+            -destination "id=$UDID" -derivedDataPath "$RUNNER_TEMP/driver-build" \
+            > "$RUNNER_TEMP/driver.log" 2>&1 &
+          for i in $(seq 1 120); do
+            if curl -sf http://127.0.0.1:8100/health; then echo; echo "Driver is up"; exit 0; fi
+            sleep 2
+          done
+          echo "::error::The tap driver did not start"
+          tail -80 "$RUNNER_TEMP/driver.log"
+          exit 1
+
+      - name: Open the session
+        env:
+          LIVE_PASSWORD: ${{ secrets.LIVE_PASSWORD }}
+          SIM_UDID: ${{ steps.sim.outputs.udid }}
+          APP_NAME: ${{ inputs.scheme }}
+          STOP_FILE: /tmp/live/stop
+        run: |
+          mkdir -p /tmp/live
+          nohup python3 lab/live/viewer/server.py --port 8080 > "$RUNNER_TEMP/viewer.log" 2>&1 &
+          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8080 > "$RUNNER_TEMP/tunnel.log" 2>&1 &
+          URL=""
+          for i in $(seq 1 60); do
+            URL=$(grep -oE "https://[a-z0-9-]+\.trycloudflare\.com" "$RUNNER_TEMP/tunnel.log" | head -1)
+            [ -n "$URL" ] && break
+            sleep 2
+          done
+          if [ -z "$URL" ]; then
+            echo "::error::Could not open the tunnel"
+            tail -40 "$RUNNER_TEMP/tunnel.log"
+            exit 1
+          fi
+          echo "::notice title=Live session is ready::$URL"
+          {
+            echo "## Live session is ready"
+            echo
+            echo "Open **$URL** and enter the session password (the LIVE_PASSWORD secret)."
+            echo
+            echo "It stays open for ${{ inputs.minutes }} minutes, or until you press End session."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Live session: $URL"
+
+      - name: Keep the session open
+        env:
+          MINUTES: ${{ inputs.minutes }}
+        run: |
+          MINUTES=${MINUTES%.*}
+          [ "$MINUTES" -gt 300 ] && MINUTES=300
+          END=$((SECONDS + MINUTES * 60))
+          warned=0
+          while [ $SECONDS -lt $END ] && [ ! -f /tmp/live/stop ]; do
+            sleep 10
+            if ! curl -sf -m 20 http://127.0.0.1:8100/health > /dev/null && [ $warned -eq 0 ]; then
+              echo "::warning::The tap driver stopped responding at $(date +%T). See the session logs."
+              warned=1
+            fi
+          done
+          [ -f /tmp/live/stop ] && echo "Ended from the viewer." || echo "Time limit reached."
+
+      - name: Upload session logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-session-logs
+          path: ${{ runner.temp }}/*.log
+          if-no-files-found: ignore
